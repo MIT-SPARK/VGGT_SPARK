@@ -24,6 +24,14 @@
 }
 ```
 
+## Spark Instructions
+
+# Visualizer
+
+To run the visualizer, run ```python3 demo_viser.py --image_folder /home/dominic/Documents/vggt/temp_images/office_loop```
+
+To left and right arrow keys let you move between layers. M selects either the attention or cosine mode. Click on any token on any frame to make it the reference token.
+
 ## Updates
 - [July 6, 2025] Training code is now available in the `training` folder, including an example to finetune VGGT on a custom dataset. 
 
