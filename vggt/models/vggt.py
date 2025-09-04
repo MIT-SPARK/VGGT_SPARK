@@ -58,7 +58,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        aggregated_tokens_list, patch_start_idx = self.aggregator(images)
+        aggregated_tokens_list, patch_start_idx, target_tokens = self.aggregator(images)
 
         predictions = {}
 
@@ -92,6 +92,9 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
 
         if not self.training:
             predictions["images"] = images  # store the images for visualization during inference
+
+        
+        predictions["target_tokens"] = target_tokens  # for image retrieval feature extraction
 
         return predictions
 

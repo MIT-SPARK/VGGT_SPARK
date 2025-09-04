@@ -9,18 +9,218 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+import numpy as np
 from typing import Optional, Tuple, Union, List, Dict, Any
+from matplotlib import pyplot as plt
 
 from vggt.layers import PatchEmbed
 from vggt.layers.block import Block
 from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
 from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
+from image_retrieval import run_asmk
+
 logger = logging.getLogger(__name__)
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
 
+import torch
+import matplotlib.pyplot as plt
+
+class CosineAttentionVisualizer:
+    def __init__(self, image_height=21, token_offset=5):
+        self.image_width = 37
+        self.image_height= image_height
+        self.token_offset = token_offset  # number of special tokens to skip (e.g., CLS, etc.)
+        self.layers = []  # each: {"name": str, "x_norm": tensor[B,N,C], "attn": tensor[B,N,N] or None}
+        self.current_layer = 0
+        self.mode = "cosine"  # "cosine" | "attention"
+        self.last_clicked = None  # (frame_idx, row, col, token_idx)
+        self.fig = None
+        self.axes = []
+        self.ims = []
+        self.colorbar = None
+
+    def add_layer(self, name, x, k, q):
+        """
+        x: (B, N, C) token embeddings (torch Tensor, CPU or CUDA)
+        attn: (B, H, N, N) or None. If given, heads will be averaged to (B, N, N).
+        """
+        eps = 1e-8
+        x_norm = x / (x.norm(dim=-1, keepdim=True) + eps)
+
+        self.layers.append({"name": name, "x_norm": x_norm, "k": k, "q": q})
+
+    # ---------- plotting & interaction ----------
+
+    def show(self):
+        if not self.layers:
+            print("No layers added.")
+            return
+
+        # Default reference: center-ish pixel in frame 0
+        if self.last_clicked is None:
+            r = min(self.image_height // 2, self.image_width - 1)
+            c = min(self.image_width // 2, self.image_width - 1)
+            token_idx = self.token_offset + r * self.image_width + c
+            self.last_clicked = (0, r, c, token_idx)
+
+        self._init_figure()
+        self._redraw()
+        plt.show()
+
+    def _init_figure(self):
+        layer = self.layers[self.current_layer]
+        B = layer["x_norm"].shape[0]
+
+        frames_per_row = 5
+        ncols = min(B, frames_per_row)
+        nrows = (B + ncols - 1) // ncols
+
+        self.fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4.5*ncols, 4.5*nrows))
+        if nrows == 1 and ncols == 1:
+            axes = [[axes]]
+        elif nrows == 1:
+            axes = [axes]
+        elif ncols == 1:
+            axes = [[ax] for ax in axes]
+
+        self.axes = [ax for row in axes for ax in row]
+        self.ims = []
+
+        # connect events once
+        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+
+    def _compute_maps(self):
+        """Return (maps: B x (W*W), vmin, vmax) for current mode using current ref token."""
+        layer = self.layers[self.current_layer]
+        x_norm = layer["x_norm"]      # (B, N, C)
+        print("B, N, C", x_norm.shape)
+        k = layer["k"]
+        q = layer["q"]
+        B, N, C = x_norm.shape
+
+        frame_idx, row, col, token_idx = self.last_clicked
+
+        tokens_per_img = self.token_offset + self.image_height*self.image_width
+
+        # guard if click outside valid token area
+        if token_idx < self.token_offset or token_idx >= N:
+            raise ValueError("Clicked token index out of range.")
+
+        if self.mode == "cosine":
+            # Use the *vector from the clicked frame* as the query, compare to ALL tokens in EVERY frame
+            ref_vec = x_norm[frame_idx, token_idx, :]                     # (C,)
+            # (C) x (B,N,C) -> (B,N)
+            maps_full = torch.einsum("c,bnc->bn", ref_vec, x_norm)
+            # display only the image tokens (skip special tokens)
+            shown = maps_full[:, self.token_offset:tokens_per_img]
+            # run_asmk(x_norm)
+            # np.save("/home/dominic/vggt/tokens2.npy", x_norm.detach().cpu().numpy())
+            vmin, vmax = 0.0, 1.0
+            return shown, vmin, vmax
+
+        else:  # attention
+            k_selected = k[:, :, token_idx+frame_idx*tokens_per_img:token_idx+frame_idx*tokens_per_img+1, :] 
+            attn = q @ k_selected.transpose(-2, -1) 
+            attn = attn.transpose(-2, -1) 
+            attn = attn.softmax(dim=-1)    
+            attn_mean = attn.mean(dim=1)
+            attn_mean = attn_mean.view(B, N)
+            shown = attn_mean[:, self.token_offset:tokens_per_img]
+            # dynamic range across all shown frames for this selection
+            vmin = float(shown.min().detach().cpu())
+            vmax = float(shown.max().detach().cpu())
+            # protect against degenerate ranges
+            print(vmin, vmax)
+            if vmin == vmax:
+                vmax = vmin + 1e-8
+            return shown, vmin, vmax
+
+    def _redraw(self):
+        maps, vmin, vmax = self._compute_maps()  # (B, W*W)
+        B = maps.shape[0]
+        W = self.image_width
+        H = self.image_height
+
+        # draw/update images
+        if not self.ims:
+            for i in range(len(self.axes)):
+                ax = self.axes[i]
+                if i < B:
+                    frame = maps[i].float().detach().cpu().reshape(H, W).numpy()
+                    im = ax.imshow(frame, cmap="viridis", vmin=vmin, vmax=vmax)
+                    ax.set_title(f"{self.layers[self.current_layer]['name']} • Frame {i}")
+                    # mark clicked pixel (same row/col) so you can see it
+                    if i == self.last_clicked[0]:
+                        ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2)
+                    else:
+                        ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
+                    self.ims.append(im)
+                else:
+                    ax.axis("off")
+
+            # one shared colorbar
+            self.colorbar = self.fig.colorbar(self.ims[0], ax=self.axes[:B],
+                                              orientation="horizontal", fraction=0.03, pad=0.08)
+        else:
+            # update existing
+            for i in range(B):
+                frame = maps[i].float().detach().cpu().reshape(H, W).numpy()
+                self.ims[i].set_data(frame)
+                self.ims[i].set_clim(vmin, vmax)
+                ax = self.axes[i]
+                # clear old markers and replot marker
+                # (remove all lines in this axes; cheap if there are only markers)
+                for ln in list(ax.lines):
+                    ln.remove()
+                if i == self.last_clicked[0]:
+                    ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2)
+                else:
+                    ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
+
+            if self.colorbar is not None:
+                self.colorbar.update_normal(self.ims[0])
+
+        self.fig.suptitle(
+            f"Mode: {self.mode} • Layer: {self.layers[self.current_layer]['name']} • "
+            f"Ref: frame={self.last_clicked[0]}, token_idx={self.last_clicked[3]} (row={self.last_clicked[1]}, col={self.last_clicked[2]})",
+            fontsize=12
+        )
+        self.fig.canvas.draw_idle()
+
+    # ---------- events ----------
+
+    def _on_click(self, event):
+        if event.inaxes not in self.axes:
+            return
+        ax_idx = self.axes.index(event.inaxes)
+
+        # guard against clicks outside image
+        if event.xdata is None or event.ydata is None:
+            return
+
+        col = int(event.xdata)
+        row = int(event.ydata)
+
+        # map (row, col) -> token index
+        token_idx = self.token_offset + row * self.image_width + col
+
+        self.last_clicked = (ax_idx, row, col, token_idx)
+        self._redraw()
+
+    def _on_key(self, event):
+        if event.key in ("right", "n"):
+            self.current_layer = (self.current_layer + 1) % len(self.layers)
+            self._redraw()
+        elif event.key in ("left", "p"):
+            self.current_layer = (self.current_layer - 1) % len(self.layers)
+            self._redraw()
+        elif event.key in ("m", "a"):  # toggle mode
+            self.mode = "attention" if self.mode == "cosine" else "cosine"
+            self._redraw()
 
 class Aggregator(nn.Module):
     """
@@ -70,7 +270,7 @@ class Aggregator(nn.Module):
         init_values=0.01,
     ):
         super().__init__()
-
+        self.viz = CosineAttentionVisualizer()
         self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
 
         # Initialize rotary position embedding if frequency > 0
@@ -202,6 +402,7 @@ class Aggregator(nn.Module):
 
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
+        print("Shape of images after normalization and reshaping:", images.shape)
         patch_tokens = self.patch_embed(images)
 
         if isinstance(patch_tokens, dict):
@@ -215,6 +416,9 @@ class Aggregator(nn.Module):
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
+
+        print("Shape of tokens after concatenation:")
+        print(camera_token.shape, register_token.shape, patch_tokens.shape, tokens.shape)
 
         pos = None
         if self.rope is not None:
@@ -234,16 +438,35 @@ class Aggregator(nn.Module):
         global_idx = 0
         output_list = []
 
+        target_layer = 20
+        target_tokens = None
+
+        # eps = 1e-8
+        # patch_tokens_save = patch_tokens / (patch_tokens.norm(dim=-1, keepdim=True) + eps)
+        # np.save("/home/dominic/vggt/tokens2_decoder.npy", patch_tokens_save.detach().cpu().numpy())
+
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
+                    print("----- Processing frame attention block -----", frame_idx)
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
                         tokens, B, S, P, C, frame_idx, pos=pos
                     )
                 elif attn_type == "global":
+                    print("----- Processing global attention block -----", global_idx)
                     tokens, global_idx, global_intermediates = self._process_global_attention(
                         tokens, B, S, P, C, global_idx, pos=pos
                     )
+                    if global_idx == target_layer:
+                        target_tokens = tokens[:,5:, :].clone()  # exclude camera and register tokens
+                        eps = 1e-8
+                        target_tokens = target_tokens / (target_tokens.norm(dim=-1, keepdim=True) + eps)
+
+                        ###### For testing loading a token #####
+                        # loaded_tokens = np.load("/home/dominic/vggt/tokens1.npy")
+                        # loaded_tokens = torch.from_numpy(loaded_tokens).to(target_tokens.device)
+                        # tokens = torch.cat([tokens, loaded_tokens[10:11,:,:]], dim=0)
+                        # S += 1
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
@@ -252,10 +475,12 @@ class Aggregator(nn.Module):
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter)
 
+        self.viz.show()
+
         del concat_inter
         del frame_intermediates
         del global_intermediates
-        return output_list, self.patch_start_idx
+        return output_list, self.patch_start_idx, target_tokens
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
@@ -275,7 +500,7 @@ class Aggregator(nn.Module):
             if self.training:
                 tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
-                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+                tokens = self.frame_blocks[frame_idx](tokens, pos=pos, viz_attention=False)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -298,9 +523,14 @@ class Aggregator(nn.Module):
             if self.training:
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
-                tokens = self.global_blocks[global_idx](tokens, pos=pos)
+                tokens, k, q = self.global_blocks[global_idx](tokens, pos=pos, viz_attention=True)
+                print(k.shape, q.shape)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
+
+        if tokens.shape != (B * S, P, C):
+            tokens = tokens.view(B, S, P, C).view(B * S, P, C)
+        self.viz.add_layer("Layer " +str(global_idx), tokens, k, q)
 
         return tokens, global_idx, intermediates
 

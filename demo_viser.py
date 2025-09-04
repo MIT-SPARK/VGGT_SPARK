@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import re
 import glob
 import time
 import threading
@@ -354,6 +355,12 @@ def main():
     # Use the provided image folder path
     print(f"Loading images from {args.image_folder}...")
     image_names = glob.glob(os.path.join(args.image_folder, "*"))
+
+    # sort by frame number
+    image_names = sorted(
+        image_names,
+        key=lambda x: int(re.search(r"frame_(\d+)\.jpg", os.path.basename(x)).group(1))
+    )
     print(f"Found {len(image_names)} images")
 
     images = load_and_preprocess_images(image_names).to(device)
@@ -373,6 +380,8 @@ def main():
 
     print("Processing model outputs...")
     for key in predictions.keys():
+        if key == "target_tokens":
+            continue
         if isinstance(predictions[key], torch.Tensor):
             predictions[key] = predictions[key].cpu().numpy().squeeze(0)  # remove batch dimension and convert to numpy
 

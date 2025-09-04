@@ -47,7 +47,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
 
-    def forward(self, x: Tensor, pos=None) -> Tensor:
+    def forward(self, x: Tensor, pos=None, viz_attention=False) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -57,23 +57,22 @@ class Attention(nn.Module):
             q = self.rope(q, pos)
             k = self.rope(k, pos)
 
-        if self.fused_attn:
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
-        else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+
+        # for visualizing attention maps
+        if viz_attention:
+            q = q * self.scale
+
+            return x, k, q
+        
         return x
 
-
 class MemEffAttention(Attention):
-    def forward(self, x: Tensor, attn_bias=None, pos=None) -> Tensor:
+    def forward(self, x: Tensor, attn_bias=None, pos=None, viz_attention=False) -> Tensor:
         assert pos is None
         if not XFORMERS_AVAILABLE:
             if attn_bias is not None:

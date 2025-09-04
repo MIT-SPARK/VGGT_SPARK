@@ -104,6 +104,7 @@ class CameraHead(nn.Module):
             list: List of activated camera encodings from each iteration.
         """
         B, S, C = pose_tokens.shape
+        print(f"CameraHead trunk_fn: B={B}, S={S}, C={C}")
         pred_pose_enc = None
         pred_pose_enc_list = []
 
