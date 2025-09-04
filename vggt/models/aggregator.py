@@ -18,7 +18,7 @@ from vggt.layers.block import Block
 from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
 from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
-from image_retrieval import run_asmk
+# from image_retrieval import run_asmk
 
 logger = logging.getLogger(__name__)
 
