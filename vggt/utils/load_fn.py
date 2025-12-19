@@ -122,7 +122,6 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
         - Dimensions are adjusted to be divisible by 14 for compatibility with model requirements
     """
     # Check for empty list
-    print(image_path_list)
     if len(image_path_list) == 0:
         raise ValueError("At least 1 image is required")
 
@@ -173,6 +172,7 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
         # Center crop height if it's larger than 518 (only in crop mode)
         if mode == "crop" and new_height > target_size:
             start_y = (new_height - target_size) // 2
+            print("Warning: Cropping image, aspect ratio is not preserved.")
             img = img[:, start_y : start_y + target_size, :]
 
         # For pad mode, pad to make a square of target_size x target_size

@@ -18,6 +18,38 @@ from vggt.layers.block import Block
 from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
 from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
+viz_attention = False
+
+def plot_first_token_cosine_matrix(token1, token2, eps=1e-8):
+    """
+    token1, token2: np arrays of shape (n, 782, 1024)
+    Uses only token index 0 from each.
+    """
+
+    # Normalize
+
+    # Extract first tokens (shape: n x 1024)
+    t1 = np.mean(token1[:, 5:, :], axis=1)  # (n x 1024)
+    t2 = np.mean(token2[:, 5:, :], axis=1)  # (n x 1024)
+
+    t1 = t1 / (np.linalg.norm(t1, axis=-1, keepdims=True) + eps)
+    t2 = t2 / (np.linalg.norm(t2, axis=-1, keepdims=True) + eps)
+
+    # Compute cosine similarity: (t1 · t2^T)
+    sim = t1 @ t2.T  # (n x n) matrix
+
+    # Plot the matrix
+    plt.figure(figsize=(5, 5))
+    plt.imshow(sim, interpolation="nearest")
+    plt.colorbar(label="cosine similarity")
+    plt.title("Cosine Similarity Matrix (First Token)")
+    plt.xlabel("Image index")
+    plt.ylabel("Image index")
+    plt.tight_layout()
+    plt.show()
+
+    return sim
+
 # from image_retrieval import run_asmk
 
 logger = logging.getLogger(__name__)
@@ -27,6 +59,58 @@ _RESNET_STD = [0.229, 0.224, 0.225]
 
 import torch
 import matplotlib.pyplot as plt
+
+def mean_top_quarter(arr):
+    # flatten to 1D
+    flat = arr.ravel()
+    # find 75th percentile threshold
+    thresh = np.percentile(flat, 75)
+    # select values >= threshold
+    top_vals = flat[flat >= thresh]
+    # return their mean
+    return top_vals.mean()
+
+
+# k_selected = k[:, :, token_idx+frame_idx*tokens_per_img:token_idx+frame_idx*tokens_per_img+1, :] 
+# attn = q @ k_selected.transpose(-2, -1)
+# attn = attn.transpose(-2, -1) 
+# attn = attn.softmax(dim=-1)    
+# attn_mean = attn.mean(dim=1)
+# attn_mean = attn_mean.view(B, N)
+# shown = attn_mean[:, self.token_offset:tokens_per_img]
+
+def get_similarity(k, q, token_offset=5, image_height=21, image_width=37):
+    num_imgs = 2
+    tokens_per_img = q.shape[2] // num_imgs
+    # print(k.shape, q.shape)
+    k = k[:,:,token_offset:tokens_per_img , :]
+    # print(k.shape)
+
+    attn = q @ k.transpose(-2, -1)
+    attn = attn.transpose(-2, -1)
+    # print(attn.shape)
+    attn = attn.softmax(dim=-1)
+    attn = attn.mean(dim=1)
+
+    all_token_to_first_frame = attn[..., :tokens_per_img]
+    all_token_to_second_frame = attn[..., tokens_per_img:]
+
+    max_per_token_first_img = all_token_to_first_frame.max(dim=-1)[0]
+
+    attn_second_frame_normalized = all_token_to_second_frame / (max_per_token_first_img.unsqueeze(-1) + 1e-8)
+    ratio = attn_second_frame_normalized.max(dim=1)[0]
+    ratio =  ratio.float().detach().cpu().numpy()
+    ratio = mean_top_quarter(ratio)
+
+
+    print("Average of top quarter attention values (all frames):", ratio)
+    # print("First Frame, Second Frame:", avg_top_quarter_first_img, avg_top_quarter_second_img)
+    # plt.figure(figsize=(6,6))
+    # plt.imshow(max_attn[1].reshape(image_height, image_width))
+    # plt.colorbar()
+    # plt.show()
+
+    return ratio
 
 class CosineAttentionVisualizer:
     def __init__(self, image_height=21, token_offset=5):
@@ -97,9 +181,10 @@ class CosineAttentionVisualizer:
         """Return (maps: B x (W*W), vmin, vmax) for current mode using current ref token."""
         layer = self.layers[self.current_layer]
         x_norm = layer["x_norm"]      # (B, N, C)
-        print("B, N, C", x_norm.shape)
+        # x_norm = torch.tensor(np.load('/home/dominic/vggt/tokens1.npy'))
         k = layer["k"]
         q = layer["q"]
+        print(self.current_layer, k.shape, q.shape, x_norm.shape)
         B, N, C = x_norm.shape
 
         frame_idx, row, col, token_idx = self.last_clicked
@@ -118,15 +203,21 @@ class CosineAttentionVisualizer:
             # display only the image tokens (skip special tokens)
             shown = maps_full[:, self.token_offset:tokens_per_img]
             # run_asmk(x_norm)
-            # np.save("/home/dominic/vggt/tokens2.npy", x_norm.detach().cpu().numpy())
+            print(self.current_layer, shown.shape)
+            # np.save("/home/dominic/Documents/vggt/test_tokens/target_tokens12.npy", x_norm.detach().cpu().numpy())
+            # plot_first_token_cosine_matrix(x_norm.detach().cpu().numpy(), x_norm.detach().cpu().numpy(), eps=1e-8)
+
             vmin, vmax = 0.0, 1.0
             return shown, vmin, vmax
 
         else:  # attention
             k_selected = k[:, :, token_idx+frame_idx*tokens_per_img:token_idx+frame_idx*tokens_per_img+1, :] 
-            attn = q @ k_selected.transpose(-2, -1) 
+            attn = q @ k_selected.transpose(-2, -1)
+            print("here",k_selected.shape, q.shape, attn.shape)
+
             attn = attn.transpose(-2, -1) 
-            attn = attn.softmax(dim=-1)    
+            attn = attn.softmax(dim=-1)   
+            print(attn.shape) 
             attn_mean = attn.mean(dim=1)
             attn_mean = attn_mean.view(B, N)
             shown = attn_mean[:, self.token_offset:tokens_per_img]
@@ -134,9 +225,11 @@ class CosineAttentionVisualizer:
             vmin = float(shown.min().detach().cpu())
             vmax = float(shown.max().detach().cpu())
             # protect against degenerate ranges
-            print(vmin, vmax)
             if vmin == vmax:
                 vmax = vmin + 1e-8
+            
+            get_similarity(k, q)
+
             return shown, vmin, vmax
 
     def _redraw(self):
@@ -152,15 +245,14 @@ class CosineAttentionVisualizer:
                 if i < B:
                     frame = maps[i].float().detach().cpu().reshape(H, W).numpy()
                     im = ax.imshow(frame, cmap="viridis", vmin=vmin, vmax=vmax)
-                    ax.set_title(f"{self.layers[self.current_layer]['name']} • Frame {i}")
+                    ax.set_title(f"Frame {i}")
                     # mark clicked pixel (same row/col) so you can see it
                     if i == self.last_clicked[0]:
-                        ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2)
-                    else:
-                        ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
+                        ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2, color='black')
+                    # else:
+                    #     ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
                     self.ims.append(im)
-                else:
-                    ax.axis("off")
+                ax.axis("off")
 
             # one shared colorbar
             self.colorbar = self.fig.colorbar(self.ims[0], ax=self.axes[:B],
@@ -177,9 +269,9 @@ class CosineAttentionVisualizer:
                 for ln in list(ax.lines):
                     ln.remove()
                 if i == self.last_clicked[0]:
-                    ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2)
-                else:
-                    ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
+                    ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=8, mew=2, color='black')
+                # else:
+                #     ax.plot(self.last_clicked[2], self.last_clicked[1], marker='x', markersize=6, alpha=0.4)
 
             if self.colorbar is not None:
                 self.colorbar.update_normal(self.ims[0])
@@ -268,6 +360,7 @@ class Aggregator(nn.Module):
         qk_norm=True,
         rope_freq=100,
         init_values=0.01,
+        target_layer=20
     ):
         super().__init__()
         self.viz = CosineAttentionVisualizer()
@@ -276,6 +369,8 @@ class Aggregator(nn.Module):
         # Initialize rotary position embedding if frequency > 0
         self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
         self.position_getter = PositionGetter() if self.rope is not None else None
+
+        self.target_layer = target_layer
 
         self.frame_blocks = nn.ModuleList(
             [
@@ -381,7 +476,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, compute_similarity=False) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -396,13 +491,16 @@ class Aggregator(nn.Module):
 
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
+        
+        # global viz_attention
+        # if compute_similarity:
+        #     viz_attention = True
 
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
-        print("Shape of images after normalization and reshaping:", images.shape)
         patch_tokens = self.patch_embed(images)
 
         if isinstance(patch_tokens, dict):
@@ -416,9 +514,6 @@ class Aggregator(nn.Module):
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
-
-        print("Shape of tokens after concatenation:")
-        print(camera_token.shape, register_token.shape, patch_tokens.shape, tokens.shape)
 
         pos = None
         if self.rope is not None:
@@ -438,33 +533,48 @@ class Aggregator(nn.Module):
         global_idx = 0
         output_list = []
 
-        target_layer = 20
         target_tokens = None
 
         # eps = 1e-8
         # patch_tokens_save = patch_tokens / (patch_tokens.norm(dim=-1, keepdim=True) + eps)
         # np.save("/home/dominic/vggt/tokens2_decoder.npy", patch_tokens_save.detach().cpu().numpy())
 
+        image_match_ratio  = None
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
+                # skip_to = 17
+                # if global_idx == 10:
+                #     global_idx = skip_to
+                    # frame_idx = skip_to
+                # if frame_idx == 24 or global_idx == 24:
+                #     break
                 if attn_type == "frame":
-                    print("----- Processing frame attention block -----", frame_idx)
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
                         tokens, B, S, P, C, frame_idx, pos=pos
                     )
                 elif attn_type == "global":
-                    print("----- Processing global attention block -----", global_idx)
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos
-                    )
-                    if global_idx == target_layer:
-                        target_tokens = tokens[:,5:, :].clone()  # exclude camera and register tokens
+                    if compute_similarity and global_idx == self.target_layer:
+                        tokens, global_idx, global_intermediates, k, q = self._process_global_attention(
+                            tokens, B, S, P, C, global_idx, pos=pos, compute_similarity=True
+                        )
+                        image_match_ratio = get_similarity(k, q)
+                    else:
+                        tokens, global_idx, global_intermediates = self._process_global_attention(
+                            tokens, B, S, P, C, global_idx, pos=pos
+                        )
+                    if global_idx == self.target_layer:
+                        print(self.target_layer)
+                        # target_tokens = tokens[:,5:, :].clone()  # exclude camera and register tokens
+                        target_tokens = tokens.clone()  # exclude camera and register tokens
                         eps = 1e-8
                         target_tokens = target_tokens / (target_tokens.norm(dim=-1, keepdim=True) + eps)
 
+
                         ###### For testing loading a token #####
                         # loaded_tokens = np.load("/home/dominic/vggt/tokens1.npy")
+                        # print(loaded_tokens.shape, loaded_tokens.dtype)
                         # loaded_tokens = torch.from_numpy(loaded_tokens).to(target_tokens.device)
+                        # tokens[0,:] = loaded_tokens[10:11,:,:]
                         # tokens = torch.cat([tokens, loaded_tokens[10:11,:,:]], dim=0)
                         # S += 1
                 else:
@@ -475,12 +585,13 @@ class Aggregator(nn.Module):
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter)
 
-        self.viz.show()
+        if viz_attention:
+            self.viz.show()
 
         del concat_inter
         del frame_intermediates
         del global_intermediates
-        return output_list, self.patch_start_idx, target_tokens
+        return output_list, self.patch_start_idx, target_tokens, image_match_ratio
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
@@ -506,7 +617,7 @@ class Aggregator(nn.Module):
 
         return tokens, frame_idx, intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None):
+    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, compute_similarity=False):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
         """
@@ -523,15 +634,30 @@ class Aggregator(nn.Module):
             if self.training:
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
-                tokens, k, q = self.global_blocks[global_idx](tokens, pos=pos, viz_attention=True)
-                print(k.shape, q.shape)
+                if viz_attention or compute_similarity:
+                    tokens, k, q = self.global_blocks[global_idx](tokens, pos=pos, viz_attention=True)
+                else:
+                    tokens = self.global_blocks[global_idx](tokens, pos=pos, viz_attention=False)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
         if tokens.shape != (B * S, P, C):
             tokens = tokens.view(B, S, P, C).view(B * S, P, C)
-        self.viz.add_layer("Layer " +str(global_idx), tokens, k, q)
-
+        if viz_attention:
+            # prior_tokens = torch.tensor(np.load("/home/dominic/Documents/vggt/token_logs/" + str(global_idx) + ".npy"))
+            # prior_tokens_k = torch.tensor(np.load("/home/dominic/Documents/vggt/token_logs/k" + str(global_idx) + ".npy"))
+            # prior_tokens_q = torch.tensor(np.load("/home/dominic/Documents/vggt/token_logs/q" + str(global_idx) + ".npy"))
+            # temp_concat = torch.cat([prior_tokens, tokens.detach().cpu()], dim=0)
+            # temp_concat_k = torch.cat([prior_tokens_k, k.detach().cpu()], dim=2)
+            # temp_concat_q = torch.cat([prior_tokens_q, q.detach().cpu()], dim=2)
+            # np.save("/home/dominic/Documents/vggt/token_logs/" + str(global_idx) + ".npy", tokens.detach().cpu().numpy())
+            # np.save("/home/dominic/Documents/vggt/token_logs/k" + str(global_idx) + ".npy", k.detach().cpu().numpy())
+            # np.save("/home/dominic/Documents/vggt/token_logs/q" + str(global_idx) + ".npy", q.detach().cpu().numpy())
+            # self.viz.add_layer("Layer " +str(global_idx), temp_concat, temp_concat_k, temp_concat_q)
+            self.viz.add_layer("Layer " +str(global_idx), tokens, k, q)
+        
+        if compute_similarity:
+            return tokens, global_idx, intermediates, k, q
         return tokens, global_idx, intermediates
 
 
