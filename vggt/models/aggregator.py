@@ -96,9 +96,13 @@ def get_similarity(k, q, token_offset=5, image_height=21, image_width=37):
     all_token_to_second_frame = attn[..., tokens_per_img:]
 
     max_per_token_first_img = all_token_to_first_frame.max(dim=-1)[0]
+    # max_per_token_second_img = all_token_to_second_frame.max(dim=-1)[0]
 
     attn_second_frame_normalized = all_token_to_second_frame / (max_per_token_first_img.unsqueeze(-1) + 1e-8)
     ratio = attn_second_frame_normalized.max(dim=1)[0]
+
+    # ratio = max_per_token_second_img / (max_per_token_first_img + 1e-8)
+
     ratio =  ratio.float().detach().cpu().numpy()
     ratio = mean_top_quarter(ratio)
 
