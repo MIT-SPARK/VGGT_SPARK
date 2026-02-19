@@ -567,20 +567,11 @@ class Aggregator(nn.Module):
                             tokens, B, S, P, C, global_idx, pos=pos
                         )
                     if global_idx == self.target_layer:
-                        print(self.target_layer)
                         # target_tokens = tokens[:,5:, :].clone()  # exclude camera and register tokens
                         target_tokens = tokens.clone()  # exclude camera and register tokens
                         eps = 1e-8
                         target_tokens = target_tokens / (target_tokens.norm(dim=-1, keepdim=True) + eps)
 
-
-                        ###### For testing loading a token #####
-                        # loaded_tokens = np.load("/home/dominic/vggt/tokens1.npy")
-                        # print(loaded_tokens.shape, loaded_tokens.dtype)
-                        # loaded_tokens = torch.from_numpy(loaded_tokens).to(target_tokens.device)
-                        # tokens[0,:] = loaded_tokens[10:11,:,:]
-                        # tokens = torch.cat([tokens, loaded_tokens[10:11,:,:]], dim=0)
-                        # S += 1
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 

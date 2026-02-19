@@ -11,12 +11,14 @@ from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
+from vggt.heads.floor_seg_head import FloorSegHead
 from vggt.heads.track_head import TrackHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
-                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, target_layer=21):
+                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, target_layer=21,
+                 enable_floor_seg=False):
         super().__init__()
 
         self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim, target_layer=target_layer)
@@ -25,6 +27,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
+        self.seg_head = FloorSegHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_floor_seg else None
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, compute_similarity=False):
         """
@@ -74,6 +77,10 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 )
                 predictions["depth"] = depth
                 predictions["depth_conf"] = depth_conf
+
+            if self.seg_head is not None:
+                floor_mask = self.seg_head(aggregated_tokens_list, images, patch_start_idx)
+                predictions["floor_mask"] = floor_mask  # [B, S, H, W] logits
 
             # if self.point_head is not None:
             #     pts3d, pts3d_conf = self.point_head(
