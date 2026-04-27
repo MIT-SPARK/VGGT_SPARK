@@ -63,35 +63,38 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         images = images.to(torch.bfloat16)
         aggregated_tokens_list, patch_start_idx, target_tokens, image_match_ratio = self.aggregator(images, compute_similarity)
 
+        # Backbone tokens are appended at index aa_block_num; standard heads only expect AA layers
+        aa_tokens_list = aggregated_tokens_list[:self.aggregator.aa_block_num]
+
         predictions = {}
 
         with torch.cuda.amp.autocast(enabled=False):
             if self.camera_head is not None:
-                pose_enc_list = self.camera_head(aggregated_tokens_list)
+                pose_enc_list = self.camera_head(aa_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
                 predictions["pose_enc_list"] = pose_enc_list
-                
+
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
-                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                    aa_tokens_list, images=images, patch_start_idx=patch_start_idx
                 )
                 predictions["depth"] = depth
                 predictions["depth_conf"] = depth_conf
 
             if self.seg_head is not None:
-                floor_mask = self.seg_head(aggregated_tokens_list, images, patch_start_idx)
+                floor_mask = self.seg_head(aa_tokens_list, images, patch_start_idx)
                 predictions["floor_mask"] = floor_mask  # [B, S, H, W] logits
 
             # if self.point_head is not None:
             #     pts3d, pts3d_conf = self.point_head(
-            #         aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+            #         aa_tokens_list, images=images, patch_start_idx=patch_start_idx
             #     )
             #     predictions["world_points"] = pts3d
             #     predictions["world_points_conf"] = pts3d_conf
 
         # if self.track_head is not None and query_points is not None:
         #     track_list, vis, conf = self.track_head(
-        #         aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
+        #         aa_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
         #     )
         #     predictions["track"] = track_list[-1]  # track of the last iteration
         #     predictions["vis"] = vis

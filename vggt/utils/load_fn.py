@@ -174,6 +174,7 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
             start_y = (new_height - target_size) // 2
             print("Warning: Cropping image, aspect ratio is not preserved.")
             img = img[:, start_y : start_y + target_size, :]
+            #img = img[:, new_height-target_size :, :]
 
         # For pad mode, pad to make a square of target_size x target_size
         if mode == "pad":

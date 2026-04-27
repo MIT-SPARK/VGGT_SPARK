@@ -533,6 +533,9 @@ class Aggregator(nn.Module):
         # update P because we added special tokens
         _, P, C = tokens.shape
 
+        # Capture backbone (pre-AA) tokens for FloorSegHead layer ablation
+        backbone_tokens = tokens.view(B, S, P, C)
+
         frame_idx = 0
         global_idx = 0
         output_list = []
@@ -582,6 +585,9 @@ class Aggregator(nn.Module):
 
         if viz_attention:
             self.viz.show()
+
+        # Append backbone tokens as the final entry (index aa_block_num)
+        output_list.append(backbone_tokens)
 
         del concat_inter
         del frame_intermediates

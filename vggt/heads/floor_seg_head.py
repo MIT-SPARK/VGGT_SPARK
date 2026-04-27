@@ -15,8 +15,8 @@ class FloorSegHead(nn.Module):
     """
     Lightweight single-scale floor segmentation head.
 
-    Reads only from aggregated_tokens_list[11] (the 12th alternating attention
-    block output, which corresponds to scale-1 in the DPT head). Predicts a
+    Reads only from aggregated_tokens_list[idx], the (idx+1)th alternating attention
+    block output, which corresponds to scale-1 in the DPT head. Predicts a
     single-channel binary mask (floor vs. not-floor) as raw logits.
 
     Args:
@@ -25,10 +25,13 @@ class FloorSegHead(nn.Module):
         layer_idx (int): Which layer in aggregated_tokens_list to read from. Default 11.
     """
 
-    def __init__(self, dim_in: int = 2048, patch_size: int = 14, layer_idx: int = 11):
+    def __init__(self, dim_in: int = 2048, patch_size: int = 14, layer_idx: int = 11,
+                 token_source: str = "both"):
         super().__init__()
         self.patch_size = patch_size
         self.layer_idx = layer_idx
+        self.token_source = token_source  # "frame", "global", or "both"
+        self.dim_in = dim_in
 
         self.norm = nn.LayerNorm(dim_in)
 
@@ -85,8 +88,13 @@ class FloorSegHead(nn.Module):
         B, S, _, H, W = images.shape
         ph, pw = H // self.patch_size, W // self.patch_size
 
-        # Extract tokens from the chosen layer: [B, S, N, dim]
+        # Extract tokens from the chosen layer: [B, S, N, full_dim]
         x = aggregated_tokens_list[self.layer_idx][:, :, patch_start_idx:]
+        # Slice to the expected feature half when trained on frame or global tokens only.
+        if self.token_source == "frame":
+            x = x[..., :self.dim_in]
+        elif self.token_source == "global":
+            x = x[..., self.dim_in:]
 
         # Flatten batch and sequence dims
         x = x.reshape(B * S, -1, x.shape[-1])  # [B*S, N, dim]

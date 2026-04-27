@@ -13,8 +13,9 @@ Usage:
         --n 4
 
 Output per batch:
-    <out_dir>/batch_0000.png  — side-by-side grid: original | overlay | heatmap
-    <out_dir>/<image_stem>_overlay.png — per-image overlay saved individually
+    <out_dir>/batch_0000.png               — side-by-side grid: original | overlay | heatmap
+    <out_dir>/segmented/<stem>_seg.png     — per-image floor overlay (always saved)
+    <out_dir>/individual/<stem>_overlay.png — per-image overlay (with --save_individual)
 """
 
 import argparse
@@ -36,7 +37,6 @@ from torchvision import transforms as TF
 from vggt.models.vggt import VGGT
 from vggt.heads.floor_seg_head import FloorSegHead
 
-LAYER_IDX = 10 
 
 # ---------------------------------------------------------------------------
 # Image loading
@@ -81,26 +81,32 @@ def build_model(checkpoint_path: str, device: torch.device):
     print("Loading VGGT backbone...")
     model = VGGT.from_pretrained("facebook/VGGT-1B")
     model = model.to(device)
-    model.to(torch.bfloat16)  # use half precision
+    model.to(torch.bfloat16)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
-    # Free heads we don't need
     for attr in ("camera_head", "depth_head", "point_head", "track_head"):
         setattr(model, attr, None)
     torch.cuda.empty_cache()
 
-    embed_dim = model.aggregator.camera_token.shape[-1] # Should be 1024
-    print(f"VGGT embed dim: {embed_dim}, using layer {LAYER_IDX} for segmentation head")
-    seg_head = FloorSegHead(dim_in=2 * embed_dim, patch_size=14, layer_idx=LAYER_IDX).to(device)
+    embed_dim = model.aggregator.camera_token.shape[-1]  # 1024
 
     print(f"Loading seg head checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location=device)
+    layer_idx = ckpt.get("layer_idx", 10)
+    dim_in    = ckpt.get("dim_in", 2 * embed_dim)
+    _default_source = "both" if dim_in == 2 * embed_dim else "frame"
+    token_source = ckpt.get("token_source", _default_source)
+    print(f"  embed_dim={embed_dim}  dim_in={dim_in}  layer_idx={layer_idx}  "
+          f"token_source={token_source}")
+
+    seg_head = FloorSegHead(dim_in=dim_in, patch_size=14, layer_idx=layer_idx,
+                            token_source=token_source).to(device)
     seg_head.load_state_dict(ckpt["seg_head_state_dict"])
     seg_head.eval()
 
-    return model, seg_head
+    return model, seg_head, layer_idx
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +114,8 @@ def build_model(checkpoint_path: str, device: torch.device):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def run_batch(model, seg_head, images_tensor: torch.Tensor, device: torch.device) -> np.ndarray:
+def run_batch(model, seg_head, images_tensor: torch.Tensor,
+              layer_idx: int, device: torch.device) -> np.ndarray:
     """
     Run inference on a batch of images.
 
@@ -123,10 +130,9 @@ def run_batch(model, seg_head, images_tensor: torch.Tensor, device: torch.device
 
     agg_tokens, patch_start_idx, _, _ = model.aggregator(x)
 
-    # Free all layers except the one we need
-    needed = agg_tokens[LAYER_IDX]
+    # Build sparse list — FloorSegHead handles token_source slicing internally
     sparse = [None] * len(agg_tokens)
-    sparse[LAYER_IDX] = needed
+    sparse[layer_idx] = agg_tokens[layer_idx]
 
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         logits = seg_head(sparse, x, patch_start_idx)  # [1, N, H, W]
@@ -144,31 +150,29 @@ OVERLAY_COLOR = np.array([0, 200, 80], dtype=np.float32)   # green
 
 def overlay_mask(image_np: np.ndarray, prob_map: np.ndarray,
                  threshold: float = 0.5, alpha: float = 0.45) -> np.ndarray:
-    """
-    Blend a probability map onto an RGB image.
-
-    Args:
-        image_np: [H, W, 3] uint8 original image (any resolution)
-        prob_map: [h, w] float32 probability in [0, 1] (model resolution)
-        threshold: binary mask threshold
-        alpha: opacity of the floor overlay
-
-    Returns:
-        [H, W, 3] uint8 blended image
-    """
+    """Blend a probability map onto an RGB image."""
     H, W = image_np.shape[:2]
-
-    # Upscale prob map to original image resolution
     prob_up = np.array(
         Image.fromarray((prob_map * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR),
         dtype=np.float32,
     ) / 255.0
-
     mask = prob_up >= threshold
-
     out = image_np.astype(np.float32)
     out[mask] = (1 - alpha) * out[mask] + alpha * OVERLAY_COLOR
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def save_segmented_image(blended: np.ndarray, out_path):
+    """Save a single overlay image with a 'Ground' legend."""
+    fig, ax = plt.subplots(figsize=(blended.shape[1] / 100, blended.shape[0] / 100))
+    ax.imshow(blended)
+    patch = mpatches.Patch(color=OVERLAY_COLOR / 255, label="Ground")
+    ax.legend(handles=[patch], loc="lower right", fontsize=50,
+              handlelength=2.5, handleheight=2.0)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    fig.savefig(out_path, dpi=100, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 
 def make_batch_figure(
@@ -179,14 +183,10 @@ def make_batch_figure(
     alpha: float,
     batch_idx: int,
 ) -> plt.Figure:
-    """
-    Create a matplotlib figure with one row per image:
-        [original] | [mask overlay] | [probability heatmap]
-    """
+    """Create a matplotlib figure with one row per image: original | overlay | heatmap."""
     n = len(image_paths)
     fig, axes = plt.subplots(n, 3, figsize=(15, 4.5 * n))
 
-    # Handle single-image case (axes is 1-D)
     if n == 1:
         axes = axes[np.newaxis, :]
 
@@ -197,17 +197,14 @@ def make_batch_figure(
     for i, (path, orig, prob) in enumerate(zip(image_paths, orig_images, prob_maps)):
         blended = overlay_mask(orig, prob, threshold, alpha)
 
-        # --- Original ---
         axes[i, 0].imshow(orig)
         axes[i, 0].set_ylabel(Path(path).name, fontsize=8, rotation=0,
                                labelpad=120, va="center")
 
-        # --- Overlay ---
         axes[i, 1].imshow(blended)
         patch = mpatches.Patch(color=OVERLAY_COLOR / 255, alpha=0.7, label="floor")
         axes[i, 1].legend(handles=[patch], loc="lower right", fontsize=8)
 
-        # --- Heatmap ---
         H, W = orig.shape[:2]
         prob_up = np.array(
             Image.fromarray((prob * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR),
@@ -245,14 +242,14 @@ def parse_args():
                         help="Frames to advance between batches (default: same as --n, non-overlapping)")
     parser.add_argument("--img_size", type=int, default=518,
                         help="Image size fed to the model")
-    parser.add_argument("--threshold", type=float, default=0.5,
+    parser.add_argument("--threshold", type=float, default=0.85,
                         help="Sigmoid threshold for binary floor mask")
     parser.add_argument("--alpha", type=float, default=0.45,
                         help="Overlay opacity (0=transparent, 1=solid)")
     parser.add_argument("--device", type=str, default=None,
                         help="Device (cuda / cpu). Defaults to cuda if available.")
     parser.add_argument("--save_individual", action="store_true",
-                        help="Also save each frame's overlay as a separate PNG")
+                        help="Also save each frame's plain overlay as a separate PNG")
     return parser.parse_args()
 
 
@@ -267,25 +264,22 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    seg_dir = out_dir / "segmented"
+    seg_dir.mkdir(exist_ok=True)
     if args.save_individual:
         (out_dir / "individual").mkdir(exist_ok=True)
 
-    # ---- Collect images ----
     all_paths = collect_images(args.image_dir)
     print(f"Found {len(all_paths)} images in {args.image_dir}")
 
-    # ---- Load model ----
-    model, seg_head = build_model(args.checkpoint, device)
+    model, seg_head, layer_idx = build_model(args.checkpoint, device)
 
-    # ---- Process in sliding windows ----
     starts = list(range(0, len(all_paths), stride))
-    # Ensure the last batch has exactly n frames (pad with last frame if needed)
     print(f"Processing {len(starts)} batch(es) of {args.n} frames (stride={stride})\n")
 
     for batch_idx, start in enumerate(starts):
         batch_paths = all_paths[start: start + args.n]
 
-        # Pad batch to exactly n frames if at the end
         if len(batch_paths) < args.n:
             batch_paths = batch_paths + [batch_paths[-1]] * (args.n - len(batch_paths))
             padded = True
@@ -295,16 +289,10 @@ def main():
         names = [p.name for p in batch_paths]
         print(f"  Batch {batch_idx:04d}: {names}" + (" [padded]" if padded else ""))
 
-        # Load images for model (resized)
         images_tensor = load_images_for_model(batch_paths, args.img_size)
-
-        # Run inference
-        prob_maps = run_batch(model, seg_head, images_tensor, device)  # [n, H, W]
-
-        # Load originals for visualization (native resolution)
+        prob_maps = run_batch(model, seg_head, images_tensor, layer_idx, device)
         orig_images = [load_image_original(p) for p in batch_paths]
 
-        # Build and save batch figure
         fig = make_batch_figure(
             batch_paths, orig_images, prob_maps,
             threshold=args.threshold,
@@ -316,13 +304,17 @@ def main():
         plt.close(fig)
         print(f"    Saved {batch_path}")
 
-        # Optionally save per-frame overlays
+        real_count = len(all_paths[start: start + args.n])
+        for i in range(real_count):
+            blended = overlay_mask(orig_images[i], prob_maps[i], args.threshold, args.alpha)
+            seg_path = seg_dir / f"{batch_paths[i].stem}_seg.png"
+            save_segmented_image(blended, seg_path)
+        print(f"    Saved {real_count} segmented image(s) to {seg_dir}/")
+
         if args.save_individual:
-            real_count = args.n - (args.n - len(all_paths[start: start + args.n]))
             for i in range(real_count):
                 blended = overlay_mask(orig_images[i], prob_maps[i], args.threshold, args.alpha)
-                stem = batch_paths[i].stem
-                out_path = out_dir / "individual" / f"{stem}_overlay.png"
+                out_path = out_dir / "individual" / f"{batch_paths[i].stem}_overlay.png"
                 Image.fromarray(blended).save(out_path)
 
     print(f"\nDone. Results saved to {out_dir}/")
