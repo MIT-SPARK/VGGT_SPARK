@@ -26,6 +26,8 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
 
+        self.sequential_heads = False  # when True, run heads one at a time to reduce peak memory
+
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, compute_similarity=False):
         """
         Forward pass of the VGGT model.
@@ -67,7 +69,12 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 pose_enc_list = self.camera_head(aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
                 predictions["pose_enc_list"] = pose_enc_list
-                
+
+            if self.sequential_heads and self.depth_head is not None:
+                # Free camera head intermediates before running depth head
+                del pose_enc_list
+                torch.cuda.empty_cache()
+
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx

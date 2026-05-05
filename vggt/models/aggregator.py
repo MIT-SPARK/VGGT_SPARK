@@ -438,6 +438,7 @@ class Aggregator(nn.Module):
             self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
 
         self.use_reentrant = False # hardcoded to False
+        self.use_checkpointing_inference = False  # set True to checkpoint during eval (saves VRAM)
 
     def __build_patch_embed__(
         self,
@@ -612,7 +613,7 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
+            if self.training or self.use_checkpointing_inference:
                 tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
                 tokens = self.frame_blocks[frame_idx](tokens, pos=pos, viz_attention=False)
@@ -635,7 +636,7 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
+            if self.training or (self.use_checkpointing_inference and not (viz_attention or compute_similarity)):
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
                 if viz_attention or compute_similarity:
