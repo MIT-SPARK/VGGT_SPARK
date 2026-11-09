@@ -70,18 +70,18 @@ def mean_top_quarter(arr):
     # return their mean
     return top_vals.mean()
 
+def get_query_detect_tokens(tokens, query_idx, det_idx, num_imgs):
+    q_size = tokens.size(2) // num_imgs
+    return torch.cat((
+        tokens[:, :, (query_idx) * q_size : (query_idx+1) * q_size, :], 
+        tokens[:, :, (det_idx) * q_size : (det_idx+1) * q_size, :]
+        ), dim=2)
 
-# k_selected = k[:, :, token_idx+frame_idx*tokens_per_img:token_idx+frame_idx*tokens_per_img+1, :] 
-# attn = q @ k_selected.transpose(-2, -1)
-# attn = attn.transpose(-2, -1) 
-# attn = attn.softmax(dim=-1)    
-# attn_mean = attn.mean(dim=1)
-# attn_mean = attn_mean.view(B, N)
-# shown = attn_mean[:, self.token_offset:tokens_per_img]
-
-def get_similarity(k, q, token_offset=5, image_height=21, image_width=37):
-    num_imgs = 2
-    tokens_per_img = q.shape[2] // num_imgs
+def get_similarity(k, q, token_offset=5, image_height=21, image_width=37, query_idx=0, det_idx=1, num_imgs=2):
+    if num_imgs != 2:
+        k = get_query_detect_tokens(k, query_idx, det_idx, num_imgs)
+        q = get_query_detect_tokens(q, query_idx, det_idx, num_imgs)
+    tokens_per_img = q.shape[2] // 2
     # print(k.shape, q.shape)
     k = k[:,:,token_offset:tokens_per_img , :]
     # print(k.shape)
@@ -480,7 +480,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor, compute_similarity=False) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, compute_similarity=False, query_idx=0, det_idx=1, num_imgs=2) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -495,10 +495,6 @@ class Aggregator(nn.Module):
 
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
-        
-        # global viz_attention
-        # if compute_similarity:
-        #     viz_attention = True
 
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
@@ -564,7 +560,7 @@ class Aggregator(nn.Module):
                         tokens, global_idx, global_intermediates, k, q = self._process_global_attention(
                             tokens, B, S, P, C, global_idx, pos=pos, compute_similarity=True
                         )
-                        image_match_ratio = get_similarity(k, q)
+                        image_match_ratio = get_similarity(k, q, query_idx=query_idx, det_idx=det_idx, num_imgs=num_imgs)
                     else:
                         tokens, global_idx, global_intermediates = self._process_global_attention(
                             tokens, B, S, P, C, global_idx, pos=pos

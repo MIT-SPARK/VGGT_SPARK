@@ -26,6 +26,17 @@
 
 ## Spark Instructions
 
+# Training Ground Segmentation Head
+
+Train weights for every layer:
+`python3 training/train_floor_seg_ablation.py --dataset_root /home/dominic/Documents/floor_label/floor_dataset --epochs 50 --layer_stride 2`
+
+Only test a specific set of layers:
+`python3 training/train_floor_seg_ablation.py --layers 4 8 12 16 20`
+
+Eval only — load best_layer_XX.pt from --out_dir, evaluate on test split:
+`python3 training/train_floor_seg_ablation.py --eval_only`
+
 # Visualizer
 Most of our local changes are done in aggregator.py.
 Use left and right arrow keys let you move between layers. M selects either the attention or cosine mode. Click on any token on any frame to make it the reference token.

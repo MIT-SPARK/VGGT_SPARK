@@ -29,7 +29,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
         self.seg_head = FloorSegHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_floor_seg else None
 
-    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, compute_similarity=False):
+    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None, compute_similarity=False, query_idx=0, det_idx=1, num_imgs=2):
         """
         Forward pass of the VGGT model.
 
@@ -61,7 +61,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
         images = images.to(torch.bfloat16)
-        aggregated_tokens_list, patch_start_idx, target_tokens, image_match_ratio = self.aggregator(images, compute_similarity)
+        aggregated_tokens_list, patch_start_idx, target_tokens, image_match_ratio = self.aggregator(images, compute_similarity, query_idx, det_idx, num_imgs)
 
         # Backbone tokens are appended at index aa_block_num; standard heads only expect AA layers
         aa_tokens_list = aggregated_tokens_list[:self.aggregator.aa_block_num]
